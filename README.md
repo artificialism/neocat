@@ -1,31 +1,27 @@
 # neocat
+Terminal file viewer with syntax highlighting, line numbers, and Git authors.
 
-Print files with syntax highlighting, dim line numbers, and optional cyan Git authors on the right. Output stays in your terminal scrollback.
+- Syntax highlighting powered by Pygments, with Dracula as the default theme.
+- Cyan author annotations on the right with `--git`.
+- Line wrapping that keeps the full source visible.
+- Plain, byte-for-byte output when piped or redirected.
+
+## Usage
+
+```sh
+neocat file.py
+neocat --git file.py
+neocat first.py second.py
+cat file.py | neocat --language python
+```
+
+The language is detected from the filename. Use `--language` for stdin or to override detection. Unknown file extensions fall back to plain text.
 
 ## Installation
 
-Requires Python 3.10+ with `venv` support. Git is needed only for `--git`.
+Requires Python 3.10+. Git is optional and only needed for author annotations.
 
-**macOS** (with [Homebrew](https://brew.sh/)):
-
-```sh
-brew install python git
-```
-
-**Ubuntu / Debian:**
-
-```sh
-sudo apt update
-sudo apt install python3 python3-venv git
-```
-
-**Fedora:**
-
-```sh
-sudo dnf install python3 python3-pip git
-```
-
-From the directory containing `neocat.py`:
+Run these commands from the directory containing `neocat.py`:
 
 ```sh
 mkdir -p "$HOME/.local/bin" "$HOME/.local/share/neocat"
@@ -39,43 +35,71 @@ EOF
 chmod +x "$HOME/.local/bin/neocat"
 ```
 
-Add this line to `~/.zshrc` (zsh) or `~/.bashrc` (bash). For bash login sessions on macOS, use `~/.bash_profile`:
+This installs a copy of the script and its dependencies for your user. You can move the source directory afterward.
+
+### Add neocat to your PATH
+
+If `~/.local/bin` is not already on your `PATH`, add this line to your shell configuration:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-For fish, run `fish_add_path "$HOME/.local/bin"` instead.
+Use `~/.zshrc` for zsh or `~/.bashrc` for bash. For bash login sessions on macOS, also add it to `~/.bash_profile`.
 
-Open a new terminal and run `neocat --version`. The command works from any directory without activating an environment.
+## Options
 
-## Usage
+| Option | Description |
+| --- | --- |
+| `--git`, `--blame` | Show the last Git author for each line. Disabled by default. |
+| `-l`, `--language LANGUAGE` | Set the syntax highlighting language. |
+| `--theme THEME` | Select a Pygments theme. Default: `dracula`. |
+| `--color auto\|always\|never` | Control color output. Default: `auto`. |
+| `--width COLUMNS` | Override the terminal width. Minimum: 8 columns. |
+| `-p`, `--plain` | Copy the original bytes without formatting. |
+| `--version` | Print the version. |
+| `--help` | Show command-line help. |
 
+Some examples:
 ```sh
-neocat file.py
-neocat --git file.py
 neocat --theme monokai file.py
-cat file.py | neocat --language python
-neocat --help
+neocat --color never file.py
+neocat --width 100 --git file.py
 ```
 
-The default theme is Dracula. `--git` shows the last author for each line; uncommitted lines show `Uncommitted`.
+## Git annotations
 
-Piped or redirected output preserves the original bytes. Use `--color always` to keep formatting or `--plain` to disable it.
+`--git` shows the author of the last commit affecting each line, using the file contents at the time they are read. Uncommitted lines are labeled `Uncommitted`. 
+Author names are shortened to fit the column, up to 24 symbols. The author column is hidden on very narrow terminals.
 
-Running without a file or with empty piped input reports an error. Directories are rejected. Use `neocat -` to read stdin explicitly.
+## Output behavior
 
-## Update
-
-From the directory containing the updated script:
+Pipes and redirects preserve the original bytes:
 
 ```sh
-cp neocat.py "$HOME/.local/share/neocat/neocat.py"
+neocat file.py > copy.py
+neocat file.py | other-command
 ```
 
-## Uninstall
+Use `--color always` to keep colors and line numbers in redirected output:
+
+```sh
+neocat --color always file.py > colored.md
+```
+
+`--plain` always copies the original bytes even with `--color always`. `--color never` disables colors but keeps line numbers in a terminal. A nonempty `NO_COLOR` or `TERM=dumb` disables automatic colors.
+Formatted output expects UTF-8 text and displays control characters as visible escape sequences. Files containing NUL bytes require `--plain`. Formatting adds a newline after the final displayed row and reads one whole file into memory. Plain output streams bytes and preserves line endings.
+
+
+## Uninstalling
 
 ```sh
 rm "$HOME/.local/bin/neocat"
 rm -rf "$HOME/.local/share/neocat"
 ```
+
+## Related tools
+
+- [bat](https://github.com/sharkdp/bat): syntax highlighting and Git change markers. Use `--paging=never` for inline output.
+- [delta](https://github.com/dandavison/delta): formatting for Git diffs and blame output.
+- [ccat](https://github.com/owenthereal/ccat): syntax highlighting for cat-style output.
