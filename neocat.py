@@ -177,7 +177,10 @@ def render(text, filename, args, authors, colored, output, comments=None):
     if not terminal_width:
         terminal_width = shutil.get_terminal_size(fallback=(80, 24)).columns
 
-    author_width = get_author_width(clean_authors, terminal_width, number_width)
+    author_width = get_author_width(
+        {number: "┐ " + author if author else "" for number, author in clean_authors.items()},
+        terminal_width, number_width,
+    )
     comment_width = 0
     if clean_comments and terminal_width >= number_width + 16:
         comment_width = min(
@@ -196,14 +199,24 @@ def render(text, filename, args, authors, colored, output, comments=None):
     code_width = max(2, code_width)
 
     for number, tokens in enumerate(token_lines(text, lexer), 1):
-        wrapped_rows = wrap_tokens(tokens, code_width)
+        wrapped_rows = list(wrap_tokens(tokens, code_width))
         for row_index, (row, cells) in enumerate(wrapped_rows):
             label = ""
             author = ""
             comment = ""
+            current_author = clean_authors.get(number, "")
+            continues = (
+                row_index < len(wrapped_rows) - 1
+                or (number < line_count and current_author == clean_authors.get(number + 1))
+            )
+            if current_author:
+                starts = row_index == 0 and current_author != clean_authors.get(number - 1)
+                if starts:
+                    author = ("┐ " if continues else "─ ") + current_author
+                else:
+                    author = "│" if continues else "┘"
             if row_index == 0:
                 label = str(number)
-                author = clean_authors.get(number, "")
                 comment = clean_comments.get(number, "")
 
             prefix = f"{label:>{number_width}}  "
@@ -243,8 +256,8 @@ def positive_int(value):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Print source files directly into terminal scrollback.")
     parser.add_argument("files", nargs="*", metavar="FILE", help="files to print; FILE N prints first N lines; - reads stdin")
-    parser.add_argument("--git", "--blame", action="store_true", help="show last Git author on the right")
-    parser.add_argument("--git-comments", action="store_true", help="show commit subjects at block starts (merge gaps up to 2 lines)")
+    parser.add_argument("--git", "--blame", action="store_true", help="show Git author at the start of each author block")
+    parser.add_argument("--git-comments", "--gc", action="store_true", help="show commit subjects at block starts (merge gaps up to 2 lines)")
     parser.add_argument("-l", "--language", help="syntax language for files or stdin")
     parser.add_argument("--theme", default="dracula", help="Pygments theme (default: dracula)")
     parser.add_argument("--color", choices=("auto", "always", "never"), default="auto")
