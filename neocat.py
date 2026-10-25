@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 import sys
+from itertools import islice
 from pathlib import Path
 
 from pygments import format as format_tokens
@@ -23,7 +24,7 @@ def safe_text(text):
     return CONTROL.sub(lambda match: f"\\x{ord(match[0]):02x}", text)
 
 
-def git_authors(path, content):
+def git_blame(path, content):
     path = Path(path).resolve()
     try:
         result = subprocess.run(
@@ -40,9 +41,10 @@ def git_authors(path, content):
         return {}
     if result.returncode:
         return {}
-    authors = {}
+    lines = {}
     number = None
     author = ""
+    summary = ""
     uncommitted = False
     for line in result.stdout.decode("utf-8", errors="replace").splitlines():
         match = HEADER.match(line)
@@ -52,12 +54,30 @@ def git_authors(path, content):
             uncommitted = int(commit_hash, 16) == 0
         elif line.startswith("author "):
             author = safe_text(line[7:])
+        elif line.startswith("summary "):
+            summary = safe_text(line[8:])
         elif line.startswith("\t") and number is not None:
-            if uncommitted:
-                authors[number] = "Uncommitted"
-            else:
-                authors[number] = author
-    return authors
+            lines[number] = (
+                commit_hash,
+                "Uncommitted" if uncommitted else author,
+                "Uncommitted" if uncommitted else summary,
+            )
+    return lines
+
+
+def git_authors(path, content):
+    return {number: info[1] for number, info in git_blame(path, content).items()}
+
+
+def git_comments(blame):
+    comments = {}
+    last_line = {}
+    for number, (commit, _, summary) in sorted(blame.items()):
+        previous = last_line.get(commit)
+        if previous is None or number - previous > 3:
+            comments[number] = summary
+        last_line[commit] = number
+    return comments
 
 
 def token_lines(text, lexer):
@@ -130,13 +150,18 @@ def get_author_width(authors, terminal_width, number_width):
     return min(longest_name, 24, column_limit)
 
 
-def render(text, filename, args, authors, colored, output):
+def render(text, filename, args, authors, colored, output, comments=None):
     text = text.replace("\r\n", "\n")
     text = safe_text(text).expandtabs(4)
 
     clean_authors = {}
     for number, author in authors.items():
         clean_authors[number] = safe_text(author)
+
+    clean_comments = {
+        number: safe_text(comment).expandtabs(4)
+        for number, comment in (comments or {}).items()
+    }
 
     lexer = select_lexer(filename, text, args.language)
     formatter = None
@@ -153,9 +178,21 @@ def render(text, filename, args, authors, colored, output):
         terminal_width = shutil.get_terminal_size(fallback=(80, 24)).columns
 
     author_width = get_author_width(clean_authors, terminal_width, number_width)
+    comment_width = 0
+    if clean_comments and terminal_width >= number_width + 16:
+        comment_width = min(
+            max(wcswidth(comment) for comment in clean_comments.values()),
+            60, terminal_width // 2,
+        )
     code_width = terminal_width - number_width - 2
     if author_width:
         code_width -= author_width + 2
+    if comment_width:
+        code_width -= comment_width + 2
+    # Prefer the requested commit comments when both columns cannot fit.
+    if code_width < 8 and author_width:
+        code_width += author_width + 2
+        author_width = 0
     code_width = max(2, code_width)
 
     for number, tokens in enumerate(token_lines(text, lexer), 1):
@@ -163,9 +200,11 @@ def render(text, filename, args, authors, colored, output):
         for row_index, (row, cells) in enumerate(wrapped_rows):
             label = ""
             author = ""
+            comment = ""
             if row_index == 0:
                 label = str(number)
                 author = clean_authors.get(number, "")
+                comment = clean_comments.get(number, "")
 
             prefix = f"{label:>{number_width}}  "
             if colored:
@@ -175,12 +214,21 @@ def render(text, filename, args, authors, colored, output):
                 source = "".join(value for _, value in row)
 
             suffix = ""
+            if author_width or comment_width:
+                suffix = " " * (code_width - cells + 2)
             if author_width:
                 author = shorten(author, author_width)
+                author_padding = author_width - wcswidth(author)
                 if colored:
                     author = CYAN + author + RESET
-                padding = code_width - cells + 2
-                suffix = " " * padding + author
+                suffix += author
+                if comment_width:
+                    suffix += " " * (author_padding + 2)
+            if comment_width:
+                comment = shorten(comment, comment_width)
+                if colored:
+                    comment = DIM + comment + RESET
+                suffix += comment
 
             output.write(prefix + source + suffix + "\n")
 
@@ -194,8 +242,9 @@ def positive_int(value):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Print source files directly into terminal scrollback.")
-    parser.add_argument("files", nargs="*", metavar="FILE", help="files to print; - reads stdin")
+    parser.add_argument("files", nargs="*", metavar="FILE", help="files to print; FILE N prints first N lines; - reads stdin")
     parser.add_argument("--git", "--blame", action="store_true", help="show last Git author on the right")
+    parser.add_argument("--git-comments", action="store_true", help="show commit subjects at block starts (merge gaps up to 2 lines)")
     parser.add_argument("-l", "--language", help="syntax language for files or stdin")
     parser.add_argument("--theme", default="dracula", help="Pygments theme (default: dracula)")
     parser.add_argument("--color", choices=("auto", "always", "never"), default="auto")
@@ -203,6 +252,14 @@ def main(argv=None):
     parser.add_argument("-p", "--plain", action="store_true", help="copy original bytes, like cat")
     parser.add_argument("--version", action="version", version="neocat 0.1.0")
     args = parser.parse_args(argv)
+    line_limit = None
+    if len(args.files) == 2 and re.fullmatch(r"[+-]?[0-9]+", args.files[-1]):
+        try:
+            line_limit = int(args.files.pop())
+        except ValueError:
+            parser.error("line count is too large")
+        if line_limit < 0:
+            parser.error("line count must be nonnegative")
     if not args.files:
         if sys.stdin.isatty():
             parser.error("provide a file or pipe input; use '-' to read stdin explicitly")
@@ -230,9 +287,16 @@ def main(argv=None):
                 stream = open(filename, "rb")
             try:
                 if not decorated:
-                    shutil.copyfileobj(stream, sys.stdout.buffer)
+                    if line_limit is None:
+                        shutil.copyfileobj(stream, sys.stdout.buffer)
+                    else:
+                        for line in islice(stream, line_limit):
+                            sys.stdout.buffer.write(line)
                     continue
-                content = stream.read()
+                if line_limit is None:
+                    content = stream.read()
+                else:
+                    content = b"".join(islice(stream, line_limit))
             finally:
                 if filename != "-":
                     stream.close()
@@ -240,9 +304,14 @@ def main(argv=None):
             if "\x00" in text:
                 raise ValueError("binary file; use --plain to copy its bytes")
             authors = {}
-            if args.git and filename != "-":
-                authors = git_authors(filename, content)
-            render(text, filename, args, authors, colored, sys.stdout)
+            comments = {}
+            if (args.git or args.git_comments) and filename != "-":
+                blame = git_blame(filename, content)
+                if args.git:
+                    authors = {number: info[1] for number, info in blame.items()}
+                if args.git_comments:
+                    comments = git_comments(blame)
+            render(text, filename, args, authors, colored, sys.stdout, comments)
         except BrokenPipeError:
             raise
         except IsADirectoryError:
