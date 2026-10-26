@@ -16,6 +16,10 @@ from wcwidth import wcwidth, wcswidth
 RESET = "\033[0m"
 DIM = "\033[2;90m"
 CYAN = "\033[36m"
+COMMIT_COLORS = tuple(
+    f"\033[{index}m"
+    for index in (91, 92, 93, 94, 95, 96)
+)
 CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 HEADER = re.compile(r"^([0-9a-f]{40,64}) \d+ (\d+)(?: \d+)?$")
 
@@ -69,13 +73,19 @@ def git_authors(path, content):
     return {number: info[1] for number, info in git_blame(path, content).items()}
 
 
-def git_comments(blame):
+def git_comments(blame, colored=False):
     comments = {}
     last_line = {}
+    seen = set()
     for number, (commit, _, summary) in sorted(blame.items()):
         previous = last_line.get(commit)
         if previous is None or number - previous > 3:
-            comments[number] = summary
+            if not colored:
+                label = summary
+            else:
+                label = summary if commit not in seen else ""
+            comments[number] = (commit, label)
+            seen.add(commit)
         last_line[commit] = number
     return comments
 
@@ -150,7 +160,7 @@ def get_author_width(authors, terminal_width, number_width):
     return min(longest_name, 24, column_limit)
 
 
-def render(text, filename, args, authors, colored, output, comments=None):
+def render(text, filename, args, authors, colored, output, comments=None, commits=None):
     text = text.replace("\r\n", "\n")
     text = safe_text(text).expandtabs(4)
 
@@ -158,9 +168,15 @@ def render(text, filename, args, authors, colored, output, comments=None):
     for number, author in authors.items():
         clean_authors[number] = safe_text(author)
 
+    comments = comments or {}
+    commits = commits or {}
     clean_comments = {
         number: safe_text(comment).expandtabs(4)
-        for number, comment in (comments or {}).items()
+        for number, (_, comment) in comments.items()
+    }
+    commit_colors = {
+        commit: COMMIT_COLORS[index % len(COMMIT_COLORS)]
+        for index, commit in enumerate(sorted(set(commits.values()) | {commit for commit, _ in comments.values()}))
     }
 
     lexer = select_lexer(filename, text, args.language)
@@ -177,7 +193,7 @@ def render(text, filename, args, authors, colored, output, comments=None):
     if not terminal_width:
         terminal_width = shutil.get_terminal_size(fallback=(80, 24)).columns
 
-    block_authors = args.git_blocks or args.git_comments
+    block_authors = args.git_blocks or args.git_comments or args.git_comments_colored
     author_labels = clean_authors
     if block_authors:
         author_labels = {
@@ -208,6 +224,9 @@ def render(text, filename, args, authors, colored, output, comments=None):
             label = ""
             author = ""
             comment = ""
+            comment_color = DIM
+            if args.git_comments_colored and number in commits:
+                comment_color = commit_colors[commits[number]]
             current_author = clean_authors.get(number, "")
             continues = (
                 row_index < len(wrapped_rows) - 1
@@ -224,6 +243,11 @@ def render(text, filename, args, authors, colored, output, comments=None):
             if row_index == 0:
                 label = str(number)
                 comment = clean_comments.get(number, "")
+                if number in comments and comment_width:
+                    if not args.git_comments_colored or number not in commits:
+                        comment_color = commit_colors[comments[number][0]]
+                    if author == "│":
+                        author = "┤"
 
             prefix = f"{label:>{number_width}}  "
             if colored:
@@ -239,14 +263,20 @@ def render(text, filename, args, authors, colored, output, comments=None):
                 author = shorten(author, author_width)
                 author_padding = author_width - wcswidth(author)
                 if colored:
-                    author = CYAN + author + RESET
+                    if args.git_comments_colored and author:
+                        author = comment_color + author[0] + CYAN + author[1:] + RESET
+                    else:
+                        author = CYAN + author + RESET
                 suffix += author
                 if comment_width:
                     suffix += " " * (author_padding + 2)
             if comment_width:
                 comment = shorten(comment, comment_width)
                 if colored:
-                    comment = DIM + comment + RESET
+                    if args.git_comments_colored:
+                        comment = comment_color + comment + RESET
+                    else:
+                        comment = DIM + comment + RESET
                 suffix += comment
 
             output.write(prefix + source + suffix + "\n")
@@ -265,6 +295,7 @@ def main(argv=None):
     parser.add_argument("--git", "--blame", action="store_true", help="show last Git author on each line")
     parser.add_argument("--git-blocks", "--gb", action="store_true", help="show authors once per block with guides, without commit subjects")
     parser.add_argument("--git-comments", "--gc", action="store_true", help="show authors with block guides and commit subjects (merge subject gaps up to 2 lines)")
+    parser.add_argument("--git-comments-colored", "--gcc", action="store_true", help="color all block guides by commit; show each subject once")
     parser.add_argument("-l", "--language", help="syntax language for files or stdin")
     parser.add_argument("--theme", default="dracula", help="Pygments theme (default: dracula)")
     parser.add_argument("--color", choices=("auto", "always", "never"), default="auto")
@@ -325,12 +356,15 @@ def main(argv=None):
                 raise ValueError("binary file; use --plain to copy its bytes")
             authors = {}
             comments = {}
-            if (args.git or args.git_blocks or args.git_comments) and filename != "-":
+            commits = {}
+            if (args.git or args.git_blocks or args.git_comments or args.git_comments_colored) and filename != "-":
                 blame = git_blame(filename, content)
                 authors = {number: info[1] for number, info in blame.items()}
-                if args.git_comments:
-                    comments = git_comments(blame)
-            render(text, filename, args, authors, colored, sys.stdout, comments)
+                if args.git_comments_colored:
+                    commits = {number: info[0] for number, info in blame.items()}
+                if args.git_comments or args.git_comments_colored:
+                    comments = git_comments(blame, colored=args.git_comments_colored)
+            render(text, filename, args, authors, colored, sys.stdout, comments, commits)
         except BrokenPipeError:
             raise
         except IsADirectoryError:
