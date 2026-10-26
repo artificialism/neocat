@@ -15,6 +15,7 @@ neocat --git file.py
 neocat --gb file.py
 neocat --git-comments file.py
 neocat --gc file.py
+neocat --gcc file.py
 neocat --git --git-comments file.py
 neocat file.py 10
 neocat --git-comments file.py 10
