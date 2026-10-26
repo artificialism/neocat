@@ -177,10 +177,14 @@ def render(text, filename, args, authors, colored, output, comments=None):
     if not terminal_width:
         terminal_width = shutil.get_terminal_size(fallback=(80, 24)).columns
 
-    author_width = get_author_width(
-        {number: "┐ " + author if author else "" for number, author in clean_authors.items()},
-        terminal_width, number_width,
-    )
+    block_authors = args.git_blocks or args.git_comments
+    author_labels = clean_authors
+    if block_authors:
+        author_labels = {
+            number: "┐ " + author if author else ""
+            for number, author in clean_authors.items()
+        }
+    author_width = get_author_width(author_labels, terminal_width, number_width)
     comment_width = 0
     if clean_comments and terminal_width >= number_width + 16:
         comment_width = min(
@@ -193,7 +197,7 @@ def render(text, filename, args, authors, colored, output, comments=None):
     if comment_width:
         code_width -= comment_width + 2
     # Prefer the requested commit comments when both columns cannot fit.
-    if code_width < 8 and author_width:
+    if comment_width and code_width < 8 and author_width:
         code_width += author_width + 2
         author_width = 0
     code_width = max(2, code_width)
@@ -209,12 +213,14 @@ def render(text, filename, args, authors, colored, output, comments=None):
                 row_index < len(wrapped_rows) - 1
                 or (number < line_count and current_author == clean_authors.get(number + 1))
             )
-            if current_author:
+            if current_author and block_authors:
                 starts = row_index == 0 and current_author != clean_authors.get(number - 1)
                 if starts:
                     author = ("┐ " if continues else "─ ") + current_author
                 else:
                     author = "│" if continues else "┘"
+            elif row_index == 0:
+                author = current_author
             if row_index == 0:
                 label = str(number)
                 comment = clean_comments.get(number, "")
@@ -256,8 +262,9 @@ def positive_int(value):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Print source files directly into terminal scrollback.")
     parser.add_argument("files", nargs="*", metavar="FILE", help="files to print; FILE N prints first N lines; - reads stdin")
-    parser.add_argument("--git", "--blame", action="store_true", help="show Git author at the start of each author block")
-    parser.add_argument("--git-comments", "--gc", action="store_true", help="show commit subjects at block starts (merge gaps up to 2 lines)")
+    parser.add_argument("--git", "--blame", action="store_true", help="show last Git author on each line")
+    parser.add_argument("--git-blocks", "--gb", action="store_true", help="show authors once per block with guides, without commit subjects")
+    parser.add_argument("--git-comments", "--gc", action="store_true", help="show authors with block guides and commit subjects (merge subject gaps up to 2 lines)")
     parser.add_argument("-l", "--language", help="syntax language for files or stdin")
     parser.add_argument("--theme", default="dracula", help="Pygments theme (default: dracula)")
     parser.add_argument("--color", choices=("auto", "always", "never"), default="auto")
@@ -318,10 +325,9 @@ def main(argv=None):
                 raise ValueError("binary file; use --plain to copy its bytes")
             authors = {}
             comments = {}
-            if (args.git or args.git_comments) and filename != "-":
+            if (args.git or args.git_blocks or args.git_comments) and filename != "-":
                 blame = git_blame(filename, content)
-                if args.git:
-                    authors = {number: info[1] for number, info in blame.items()}
+                authors = {number: info[1] for number, info in blame.items()}
                 if args.git_comments:
                     comments = git_comments(blame)
             render(text, filename, args, authors, colored, sys.stdout, comments)

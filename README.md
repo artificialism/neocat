@@ -12,6 +12,7 @@ Terminal file viewer with syntax highlighting, line numbers, and Git authors.
 ```sh
 neocat file.py
 neocat --git file.py
+neocat --gb file.py
 neocat --git-comments file.py
 neocat --gc file.py
 neocat --git --git-comments file.py
@@ -59,8 +60,9 @@ Use `~/.zshrc` for zsh or `~/.bashrc` for bash. For bash login sessions on macOS
 
 | Option | Description |
 | --- | --- |
-| `--git`, `--blame` | Show the Git author at the start of each continuous author block. Disabled by default. |
-| `--git-comments`, `--gc` | Show the commit subject on the first line of each block. Merge gaps of up to two lines. Disabled by default. |
+| `--git`, `--blame` | Show the last Git author on every source line. Disabled by default. |
+| `--git-blocks`, `--gb` | Show authors once per continuous block with guides, without commit subjects. Disabled by default. |
+| `--git-comments`, `--gc` | Show authors with block guides and commit subjects. Merge subject gaps of up to two lines. Disabled by default. |
 | `-l`, `--language LANGUAGE` | Set the syntax highlighting language. |
 | `--theme THEME` | Select a Pygments theme. Default: `dracula`. |
 | `--color auto\|always\|never` | Control color output. Default: `auto`. |
@@ -78,13 +80,13 @@ neocat --width 100 --git file.py
 
 ## Git annotations
 
-`--git` uses the author of the last commit affecting each line, using the file contents at the time they are read. The name appears only on the first line of a continuous run by the same author. When authors alternate, each change of author repeats the name, including runs of just one line. Uncommitted blocks are labeled `Uncommitted`.
+`--git` (or `--blame`) shows the author of the last commit affecting every source line, using the file contents at the time they are read. Names repeat on each source line without block guides. Uncommitted lines are labeled `Uncommitted`.
 Author names are shortened to fit the column, up to 24 symbols. The author column is hidden on very narrow terminals.
-Author blocks are marked with `┐ Name` on the first row, `│` on continuation rows, and `┘` on the last row. Single-row blocks use `─ Name`. The guide also follows wrapped code rows and ends at the last displayed line when a line limit is used.
+`--git-blocks` (or `--gb`) groups authors without commit subjects: the name appears once per continuous author block. When authors alternate, each change repeats the name. Author blocks are marked with `┐ Name` on the first row, `│` on continuation rows, and `┘` on the last row. Single-row blocks use `─ Name`. The guide also follows wrapped code rows and ends at the last displayed line when a line limit is used. `--gc` uses the same author blocks and adds commit subjects.
 
 `--git-comments` shows the subject (first line of the commit message) on the right of the first line of each block attributed to that commit by Git blame. Consecutive sections from the same commit separated by one or two lines share one annotation. A gap of three or more lines starts a new block and repeats the subject. Intervening lines from other commits retain their own block annotations, even when commit subjects are identical.
 
-This describes the latest commit affecting each current line, rather than every historical change. Uncommitted blocks are labeled `Uncommitted`. Comments can be used independently or together with `--git`; Git blame runs once per file. Subjects are shortened with an ellipsis to fit up to half the terminal width (at most 60 columns), and hidden on very narrow terminals. If both columns cannot fit, comments take priority over authors. Outside Git, for untracked files, or for stdin, Git annotations are omitted. Piped output and `--plain` still preserve the original bytes.
+This describes the latest commit affecting each current line, rather than every historical change. Uncommitted blocks are labeled `Uncommitted`. `--gb` and `--gc` include authors automatically and take priority over the per-line display of `--git` or `--blame`. Combining `--gb` and `--gc` shows blocks with commit subjects, just like `--gc`. Git blame runs once per file. Subjects are shortened with an ellipsis to fit up to half the terminal width (at most 60 columns), and hidden on very narrow terminals. If both columns cannot fit, comments take priority over authors. Outside Git, for untracked files, or for stdin, Git annotations are omitted. Piped output and `--plain` still preserve the original bytes.
 
 ## Output behavior
 
