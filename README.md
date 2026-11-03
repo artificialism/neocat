@@ -3,7 +3,7 @@ Terminal file viewer with syntax highlighting, line numbers, and Git authors.
 
 - Syntax highlighting powered by Pygments, with Dracula as the default theme.
 - Cyan author annotations on the right with `--git`.
-- Commit subjects at the start of each changed block with `--git-comments`.
+- Commit-colored guides and a subject at each commit’s first appearance with `-gcc`.
 - Line wrapping that keeps the full source visible.
 - Plain, byte-for-byte output when piped or redirected.
 
@@ -13,12 +13,9 @@ Terminal file viewer with syntax highlighting, line numbers, and Git authors.
 neocat file.py
 neocat --git file.py
 neocat --gb file.py
-neocat --git-comments file.py
-neocat --gc file.py
-neocat --gcc file.py
-neocat --git --git-comments file.py
+neocat -gcc file.py
 neocat file.py 10
-neocat --git-comments file.py 10
+neocat -gcc file.py 10
 neocat first.py second.py
 cat file.py | neocat --language python
 ```
@@ -27,51 +24,75 @@ The language is detected from the filename. Use `--language` for stdin or to ove
 
 Use `neocat FILE N` to print the first N source lines of a single file, or `neocat - N` for stdin. Wrapped display rows do not count as additional source lines. Zero prints nothing; counts larger than the file print the whole file. The limit also works with Git annotations, pipes, redirects, and `--plain`, preserving the selected lines' original bytes in plain output. With two positional arguments, a trailing integer is interpreted as the line count; use `./10` to refer to a second file literally named `10`.
 
+### Default Git display
+
+Save the Git display used when no Git flag is supplied:
+
+```sh
+neocat --git set-default gcc   # colored commit guides and subjects
+neocat --git set-default gb    # author blocks
+neocat --git set-default git   # author on every line
+neocat --git set-default none  # turn off the saved Git display
+```
+
+After selecting `gcc`, `neocat file.py` uses the same display as `neocat -gcc file.py`. Explicit Git flags override the saved choice: `neocat --g file.py` still shows authors on every line. The `--g` alias also works for `set-default`. Settings are stored in `$XDG_CONFIG_HOME/neocat/config.json`, or `~/.config/neocat/config.json` when that environment variable is unset. No default is saved until you run `set-default`. Ordinary pipes, redirects, and `--plain` continue to preserve the selected source bytes; `--color always` enables formatted output and the saved display even when redirected. Invalid settings produce a warning and fall back to no Git annotations; explicit Git flags bypass the settings file.
+
+`none` resets only the saved Git display: syntax highlighting and line numbers remain enabled in formatted output. Each `set-default` command saves the choice and exits without printing a file.
+
 ## Installation
 
-Requires Python 3.10+. Git is optional and only needed for author annotations.
+Requires Python 3.10+. Git is optional and only needed for Git annotations.
 
-Run these commands from the directory containing `neocat.py`:
+Run from the directory containing `neocat.py`:
 
 ```sh
 mkdir -p "$HOME/.local/bin" "$HOME/.local/share/neocat"
 python3 -m venv "$HOME/.local/share/neocat/venv"
 "$HOME/.local/share/neocat/venv/bin/python" -m pip install 'Pygments>=2.18,<3' 'wcwidth>=0.2.13,<1'
 cp neocat.py "$HOME/.local/share/neocat/neocat.py"
-cat > "$HOME/.local/bin/neocat" <<'EOF'
+cat > "$HOME/.local/share/neocat/launcher" <<'EOF'
 #!/bin/sh
 exec "$HOME/.local/share/neocat/venv/bin/python" "$HOME/.local/share/neocat/neocat.py" "$@"
 EOF
-chmod +x "$HOME/.local/bin/neocat"
+chmod +x "$HOME/.local/share/neocat/launcher"
+ln -sf "$HOME/.local/share/neocat/launcher" "$HOME/.local/bin/neocat"
 ```
 
-This installs a copy of the script and its dependencies for your user. You can move the source directory afterward.
-
-### Add neocat to your PATH
-
-If `~/.local/bin` is not already on your `PATH`, add this line to your shell configuration:
+Add `~/.local/bin` to your PATH if necessary:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Use `~/.zshrc` for zsh or `~/.bashrc` for bash. For bash login sessions on macOS, also add it to `~/.bash_profile`.
+Save that line in `~/.zshrc` for zsh or `~/.bashrc` for bash, then restart your shell.
+
+To update an installation, copy the current script again:
+
+```sh
+cp neocat.py "$HOME/.local/share/neocat/neocat.py"
+```
+
+For development, run the source directly with its dependencies installed:
+
+```sh
+python3 neocat.py file.py
+```
 
 ## Options
 
 | Option | Description |
 | --- | --- |
-| `--git`, `--blame` | Show the last Git author on every source line. Disabled by default. |
-| `--git-blocks`, `--gb` | Show authors once per continuous block with guides, without commit subjects. Disabled by default. |
-| `--git-comments`, `--gc` | Show authors with block guides and commit subjects. Merge subject gaps of up to two lines. Disabled by default. |
-| `--git-comments-colored`, `--gcc` | Color all block guides by commit; show each commit subject once per file, without hashes. Disabled by default. |
+| `--git`, `--g` | Show the last Git author on every source line. Overrides the saved default. |
+| `--git-blocks`, `--gb` | Show authors once per continuous block with guides, without commit subjects. Overrides the saved default. |
+| `--git-comments-colored`, `-gcc` | Color all block guides by commit; show each commit subject once per file, without hashes. Overrides the saved default. |
+| `--git set-default none\|git\|gb\|gcc` | Save the default Git display and exit. Also accepts `--g set-default`. |
 | `-l`, `--language LANGUAGE` | Set the syntax highlighting language. |
 | `--theme THEME` | Select a Pygments theme. Default: `dracula`. |
 | `--color auto\|always\|never` | Control color output. Default: `auto`. |
 | `--width COLUMNS` | Override the terminal width. Minimum: 8 columns. |
 | `-p`, `--plain` | Copy the original bytes without formatting. |
 | `--version` | Print the version. |
-| `--help` | Show command-line help. |
+| `-h`, `--help` | Show command-line help. |
 
 Some examples:
 ```sh
@@ -82,17 +103,15 @@ neocat --width 100 --git file.py
 
 ## Git annotations
 
-A block is a continuous section of code attributed to one author. In `--gcc`, the guide colors distinguish different commits within these author blocks.
+A block is a continuous section of code attributed to one author. In `-gcc`, the guide colors distinguish different commits within these author blocks.
 
-`--git` (or `--blame`) shows the author of the last commit affecting every source line, using the file contents at the time they are read. Names repeat on each source line without block guides. Uncommitted lines are labeled `Uncommitted`.
+`--git` (or `--g`) shows the author of the last commit affecting every source line, using the file contents at the time they are read. Names repeat on each source line without block guides. Uncommitted lines are labeled `Uncommitted`.
 Author names are shortened to fit the column, up to 24 symbols. The author column is hidden on very narrow terminals.
-`--git-blocks` (or `--gb`) groups authors without commit subjects: the name appears once per continuous author block. When authors alternate, each change repeats the name. Author blocks are marked with `┐ Name` on the first row, `│` on continuation rows, and `┘` on the last row. Single-row blocks use `─ Name`. The guide also follows wrapped code rows and ends at the last displayed line when a line limit is used. `--gc` uses the same author blocks and adds commit subjects.
+`--git-blocks` (or `--gb`) groups authors without commit subjects: the name appears once per continuous author block. When authors alternate, each change repeats the name. Author blocks are marked with `┐ Name` on the first row, `│` on continuation rows, and `┘` on the last row. Single-row blocks use `─ Name`. The guide also follows wrapped code rows and ends at the last displayed line when a line limit is used. `-gcc` uses the same author blocks and adds commit colors and subjects.
 
-`--git-comments` (or `--gc`) shows the full subject (first line of the commit message) at the start of each section, without commit hashes or individual commit colors. Consecutive sections from the same commit separated by one or two lines share one annotation. A gap of three or more lines starts a new section and repeats the subject. Intervening lines from other commits retain their own annotations, even when commit subjects are identical.
+`--git-comments-colored` (or `-gcc`) shows no commit hashes. It shows each subject only at the commit's first appearance in the file. All guide markers belonging to a source line use that line's commit color, including wrapped continuation rows and closing corners. The subject shares that color; returning sections keep the color without repeating the subject. The first six commits use the terminal’s classic bright colors (red, green, yellow, blue, magenta, cyan). Additional commits receive distinct generated RGB colors; these require true-color terminal support. Disabling color still shows subjects once without hashes. Sections starting inside an author block use a left branch `┤`; the final row keeps `┘`. Uncommitted changes use their own color and one `Uncommitted` annotation.
 
-`--git-comments-colored` (or `--gcc`) shows no commit hashes. It shows each subject only at the commit's first appearance in the file. All guide markers belonging to a source line use that line's commit color, including wrapped continuation rows and closing corners. The subject shares that color; returning sections keep the color without repeating the subject. The palette uses the terminal’s six classic bright colors (red, green, yellow, blue, magenta, cyan) and cycles after six commits. Disabling color still shows subjects once without hashes. Both comment modes use a left branch `┤` at section starts inside an author block; the final row keeps `┘`. Uncommitted changes use their own color and one `Uncommitted` annotation. If both `--gc` and `--gcc` are supplied, `--gcc` takes priority.
-
-This describes the latest commit affecting each current line, rather than every historical change. Uncommitted blocks are labeled `Uncommitted`. `--gb` and `--gc` include authors automatically and take priority over the per-line display of `--git` or `--blame`. Combining `--gb` and `--gc` shows blocks with commit subjects, just like `--gc`. Git blame runs once per file. Subjects are shortened with an ellipsis to fit up to half the terminal width (at most 60 columns), and hidden on very narrow terminals. If both columns cannot fit, comments take priority over authors. Outside Git, for untracked files, or for stdin, Git annotations are omitted. Piped output and `--plain` still preserve the original bytes.
+This describes the latest commit affecting each current line, rather than every historical change. Uncommitted blocks are labeled `Uncommitted`. `--gb` and `-gcc` include authors automatically and take priority over the per-line display of `--git` or `--g`. Combining `--gb` and `-gcc` keeps commit colors and subjects. Git blame runs once per file. Subjects are shortened with an ellipsis to fit the available space (at most 60 columns), and hidden on very narrow terminals. `-gcc` reserves at least half the terminal width for code when annotations are shown. If both annotation columns cannot fit, comments take priority over authors. Outside Git, for untracked files, or for stdin, Git annotations are omitted. Piped output and `--plain` still preserve the original bytes.
 
 ## Output behavior
 

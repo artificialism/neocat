@@ -1,9 +1,12 @@
 import argparse
+import colorsys
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from itertools import islice
 from pathlib import Path
 
@@ -22,6 +25,7 @@ COMMIT_COLORS = tuple(
 )
 CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 HEADER = re.compile(r"^([0-9a-f]{40,64}) \d+ (\d+)(?: \d+)?$")
+GIT_MODES = ("none", "git", "gb", "gcc")
 
 
 def safe_text(text):
@@ -69,21 +73,14 @@ def git_blame(path, content):
     return lines
 
 
-def git_authors(path, content):
-    return {number: info[1] for number, info in git_blame(path, content).items()}
-
-
-def git_comments(blame, colored=False):
+def git_comments(blame):
     comments = {}
     last_line = {}
     seen = set()
     for number, (commit, _, summary) in sorted(blame.items()):
         previous = last_line.get(commit)
         if previous is None or number - previous > 3:
-            if not colored:
-                label = summary
-            else:
-                label = summary if commit not in seen else ""
+            label = summary if commit not in seen else ""
             comments[number] = (commit, label)
             seen.add(commit)
         last_line[commit] = number
@@ -160,6 +157,70 @@ def get_author_width(authors, terminal_width, number_width):
     return min(longest_name, 24, column_limit)
 
 
+def get_commit_colors(commits):
+    colors = {}
+    used_rgb = set()
+    for index, commit in enumerate(sorted(set(commits))):
+        if index < len(COMMIT_COLORS):
+            color = COMMIT_COLORS[index]
+        else:
+            hue = ((index - len(COMMIT_COLORS)) * 0.618033988749895) % 1
+            rgb = colorsys.hsv_to_rgb(hue, 0.8, 1.0)
+            red, green, blue = (round(channel * 255) for channel in rgb)
+            value = (red << 16) | (green << 8) | blue
+            while value in used_rgb:
+                value = (value + 1) % 0x1000000
+            used_rgb.add(value)
+            red, green, blue = value >> 16, (value >> 8) & 255, value & 255
+            color = f"\033[38;2;{red};{green};{blue}m"
+        colors[commit] = color
+    return colors
+
+
+def get_columns(authors, comments, terminal_width, number_width, block_authors):
+    labels = authors
+    if block_authors:
+        labels = {number: "┐ " + author if author else "" for number, author in authors.items()}
+    author_width = get_author_width(labels, terminal_width, number_width)
+    available = terminal_width - number_width - 2
+    comment_width = 0
+    if comments and terminal_width >= number_width + 16:
+        wanted = min(max(wcswidth(text) for text in comments.values()), 60, terminal_width // 2)
+        reserved_code = max(8, terminal_width // 2)
+        budget = available - reserved_code - (author_width + 2 if author_width else 0) - 2
+        if wanted and budget < min(12, wanted):
+            author_width = 0
+            budget = available - reserved_code - 2
+        comment_width = min(wanted, max(0, budget))
+    code_width = available
+    if author_width:
+        code_width -= author_width + 2
+    if comment_width:
+        code_width -= comment_width + 2
+    return max(2, code_width), author_width, comment_width
+
+
+def format_git_annotation(author, comment, color, author_width, comment_width, colored, colored_commits):
+    annotation = ""
+    if author_width:
+        author = shorten(author, author_width)
+        padding = author_width - wcswidth(author)
+        if colored:
+            if colored_commits and author:
+                author = color + author[0] + CYAN + author[1:] + RESET
+            else:
+                author = CYAN + author + RESET
+        annotation += author
+        if comment_width:
+            annotation += " " * (padding + 2)
+    if comment_width:
+        comment = shorten(comment, comment_width)
+        if colored:
+            comment = (color if colored_commits else DIM) + comment + RESET
+        annotation += comment
+    return annotation
+
+
 def render(text, filename, args, authors, colored, output, comments=None, commits=None):
     text = text.replace("\r\n", "\n")
     text = safe_text(text).expandtabs(4)
@@ -174,10 +235,11 @@ def render(text, filename, args, authors, colored, output, comments=None, commit
         number: safe_text(comment).expandtabs(4)
         for number, (_, comment) in comments.items()
     }
-    commit_colors = {
-        commit: COMMIT_COLORS[index % len(COMMIT_COLORS)]
-        for index, commit in enumerate(sorted(set(commits.values()) | {commit for commit, _ in comments.values()}))
-    }
+    commit_colors = {}
+    if colored and args.git_comments_colored:
+        commit_colors = get_commit_colors(
+            set(commits.values()) | {commit for commit, _ in comments.values()}
+        )
 
     lexer = select_lexer(filename, text, args.language)
     formatter = None
@@ -193,30 +255,10 @@ def render(text, filename, args, authors, colored, output, comments=None, commit
     if not terminal_width:
         terminal_width = shutil.get_terminal_size(fallback=(80, 24)).columns
 
-    block_authors = args.git_blocks or args.git_comments or args.git_comments_colored
-    author_labels = clean_authors
-    if block_authors:
-        author_labels = {
-            number: "┐ " + author if author else ""
-            for number, author in clean_authors.items()
-        }
-    author_width = get_author_width(author_labels, terminal_width, number_width)
-    comment_width = 0
-    if clean_comments and terminal_width >= number_width + 16:
-        comment_width = min(
-            max(wcswidth(comment) for comment in clean_comments.values()),
-            60, terminal_width // 2,
-        )
-    code_width = terminal_width - number_width - 2
-    if author_width:
-        code_width -= author_width + 2
-    if comment_width:
-        code_width -= comment_width + 2
-    # Prefer the requested commit comments when both columns cannot fit.
-    if comment_width and code_width < 8 and author_width:
-        code_width += author_width + 2
-        author_width = 0
-    code_width = max(2, code_width)
+    block_authors = args.git_blocks or args.git_comments_colored
+    code_width, author_width, comment_width = get_columns(
+        clean_authors, clean_comments, terminal_width, number_width, block_authors
+    )
 
     for number, tokens in enumerate(token_lines(text, lexer), 1):
         wrapped_rows = list(wrap_tokens(tokens, code_width))
@@ -225,7 +267,7 @@ def render(text, filename, args, authors, colored, output, comments=None, commit
             author = ""
             comment = ""
             comment_color = DIM
-            if args.git_comments_colored and number in commits:
+            if colored and args.git_comments_colored and number in commits:
                 comment_color = commit_colors[commits[number]]
             current_author = clean_authors.get(number, "")
             continues = (
@@ -244,7 +286,7 @@ def render(text, filename, args, authors, colored, output, comments=None, commit
                 label = str(number)
                 comment = clean_comments.get(number, "")
                 if number in comments and comment_width:
-                    if not args.git_comments_colored or number not in commits:
+                    if colored and args.git_comments_colored and number not in commits:
                         comment_color = commit_colors[comments[number][0]]
                     if author == "│":
                         author = "┤"
@@ -259,25 +301,10 @@ def render(text, filename, args, authors, colored, output, comments=None, commit
             suffix = ""
             if author_width or comment_width:
                 suffix = " " * (code_width - cells + 2)
-            if author_width:
-                author = shorten(author, author_width)
-                author_padding = author_width - wcswidth(author)
-                if colored:
-                    if args.git_comments_colored and author:
-                        author = comment_color + author[0] + CYAN + author[1:] + RESET
-                    else:
-                        author = CYAN + author + RESET
-                suffix += author
-                if comment_width:
-                    suffix += " " * (author_padding + 2)
-            if comment_width:
-                comment = shorten(comment, comment_width)
-                if colored:
-                    if args.git_comments_colored:
-                        comment = comment_color + comment + RESET
-                    else:
-                        comment = DIM + comment + RESET
-                suffix += comment
+            suffix += format_git_annotation(
+                author, comment, comment_color, author_width, comment_width,
+                colored, args.git_comments_colored,
+            )
 
             output.write(prefix + source + suffix + "\n")
 
@@ -289,13 +316,51 @@ def positive_int(value):
     return number
 
 
+def config_path():
+    directory = os.environ.get("XDG_CONFIG_HOME")
+    root = Path(directory) if directory else Path.home() / ".config"
+    return root / "neocat" / "config.json"
+
+
+def load_default_mode():
+    path = config_path()
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(settings, dict) or settings.get("git_mode") not in GIT_MODES:
+            raise ValueError("git_mode must be one of: " + ", ".join(GIT_MODES))
+        return settings["git_mode"]
+    except FileNotFoundError:
+        return "none"
+    except (OSError, UnicodeError, ValueError) as error:
+        print(f"neocat: ignoring {safe_text(str(path))}: {safe_text(str(error))}", file=sys.stderr)
+        return "none"
+
+
+def save_default_mode(mode):
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump({"git_mode": mode}, stream)
+            stream.write("\n")
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Print source files directly into terminal scrollback.")
+    parser = argparse.ArgumentParser(
+        description="Print source files directly into terminal scrollback.",
+        epilog="Set the saved Git display: neocat --git set-default {none,git,gb,gcc}",
+        allow_abbrev=False,
+    )
     parser.add_argument("files", nargs="*", metavar="FILE", help="files to print; FILE N prints first N lines; - reads stdin")
-    parser.add_argument("--git", "--blame", action="store_true", help="show last Git author on each line")
+    parser.add_argument("--git", "--g", action="store_true", help="show last Git author on each line")
     parser.add_argument("--git-blocks", "--gb", action="store_true", help="show authors once per block with guides, without commit subjects")
-    parser.add_argument("--git-comments", "--gc", action="store_true", help="show authors with block guides and commit subjects (merge subject gaps up to 2 lines)")
-    parser.add_argument("--git-comments-colored", "--gcc", action="store_true", help="color all block guides by commit; show each subject once")
+    parser.add_argument("--git-comments-colored", "-gcc", action="store_true", help="color all block guides by commit; show each subject once")
     parser.add_argument("-l", "--language", help="syntax language for files or stdin")
     parser.add_argument("--theme", default="dracula", help="Pygments theme (default: dracula)")
     parser.add_argument("--color", choices=("auto", "always", "never"), default="auto")
@@ -303,6 +368,15 @@ def main(argv=None):
     parser.add_argument("-p", "--plain", action="store_true", help="copy original bytes, like cat")
     parser.add_argument("--version", action="version", version="neocat 0.1.0")
     args = parser.parse_args(argv)
+    if args.git and args.files and args.files[0] == "set-default":
+        if len(args.files) != 2 or args.files[1] not in GIT_MODES or args.git_blocks or args.git_comments_colored:
+            parser.error("use: neocat --git set-default {none,git,gb,gcc}")
+        try:
+            save_default_mode(args.files[1])
+        except OSError as error:
+            parser.exit(1, f"neocat: cannot save default: {safe_text(str(error))}\n")
+        print(f"Default Git display: {args.files[1]}")
+        return 0
     line_limit = None
     if len(args.files) == 2 and re.fullmatch(r"[+-]?[0-9]+", args.files[-1]):
         try:
@@ -319,6 +393,11 @@ def main(argv=None):
 
     terminal = sys.stdout.isatty()
     decorated = not args.plain and (terminal or args.color == "always")
+    if decorated and not (args.git or args.git_blocks or args.git_comments_colored):
+        mode = load_default_mode()
+        args.git = mode == "git"
+        args.git_blocks = mode == "gb"
+        args.git_comments_colored = mode == "gcc"
     auto_color = (
         args.color == "auto"
         and not os.environ.get("NO_COLOR")
@@ -357,13 +436,12 @@ def main(argv=None):
             authors = {}
             comments = {}
             commits = {}
-            if (args.git or args.git_blocks or args.git_comments or args.git_comments_colored) and filename != "-":
+            if (args.git or args.git_blocks or args.git_comments_colored) and filename != "-":
                 blame = git_blame(filename, content)
                 authors = {number: info[1] for number, info in blame.items()}
                 if args.git_comments_colored:
                     commits = {number: info[0] for number, info in blame.items()}
-                if args.git_comments or args.git_comments_colored:
-                    comments = git_comments(blame, colored=args.git_comments_colored)
+                    comments = git_comments(blame)
             render(text, filename, args, authors, colored, sys.stdout, comments, commits)
         except BrokenPipeError:
             raise
